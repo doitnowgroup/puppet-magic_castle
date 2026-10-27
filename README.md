@@ -925,7 +925,7 @@ driver libraries when applications expect them in a specific path.
 | :--------------------- | :------------------------------------------------------------- | :------------ |
 | `dcgm_packages`        | DCGM packages installed from the NVIDIA CUDA repository. These packages provide the NVIDIA Data Center GPU Manager service used for GPU metrics collection, for example by `slurm-job-exporter`. Set to an empty list to skip DCGM package installation. | Array[String] |
 | `load_modules`         | Load NVIDIA kernel modules and start NVIDIA services. Defaults to true when an NVIDIA GPU is detected. Set to false when building images without GPU access. | Boolean |
-| `lib_symlink_path`     | Path where symlinks to installed NVIDIA shared libraries are created. Useful when applications expect the driver libraries in a non-standard location. | Optional[String] |
+| `lib_symlink_path`     | Path where symlinks to installed NVIDIA shared libraries are created. Useful when applications expect the driver libraries in a non-standard location. For EESSI GPU support, set this to a node-local path (e.g. `/opt/eessi/nvidia`) and pair with `EESSI_NVIDIA_OVERRIDE_DEFAULT` via `profile::software_stack`. | Optional[String] |
 
 <details>
 <summary>default values</summary>
@@ -1804,6 +1804,8 @@ variable [`software_stack`](https://github.com/ComputeCanada/magic_castle/tree/m
 | `initial_profile`         | Path to shell script initializing software environment variables | String |
 | `extra_site_env_vars`     | Map of environment variables that will be exported before sourcing profile shell scripts. | Hash[String, String] |
 | `lmod_default_modules`    | List of lmod default modules |Array[String] |
+| `eessi_host_injections`   | Path used for `EESSI_HOST_INJECTIONS`. When using EESSI with GPUs, this should point to shared storage (e.g. `/project/eessi`). Defaults to `/opt/eessi`. | String |
+| `eessi_nvidia_override_default` | Path used for `EESSI_NVIDIA_OVERRIDE_DEFAULT`. For GPU nodes this should point to a node-local directory where NVIDIA driver libraries are symlinked (e.g. `/opt/eessi/nvidia`). Defaults to `/opt/eessi/nvidia`. | String |
 
 <details>
 <summary>default values</summary>
@@ -1832,6 +1834,40 @@ profile::software_stack::extra_site_env_vars: {}
 profile::software_stack::lmod_default_modules:
   - GCC
 ```
+
+#### EESSI GPU support (split design)
+
+When `software_stack` is `eessi` and running on GPU nodes, this class writes
+`/etc/cvmfs/config.d/software.eessi.io.local` with both keys and reloads
+`software.eessi.io`. The driver libraries stay node-local while site software
+goes to shared storage:
+
+```yaml
+# data/software_stack/eessi.yaml (recommended)
+profile::software_stack::eessi_host_injections: '/project/eessi'
+profile::gpu::install::lib_symlink_path: '/opt/eessi/nvidia'
+```
+
+The `nvidia-symlink` exec (from `profile::gpu::install`) populates
+`profile::gpu::install::lib_symlink_path` with symlinks to the host driver
+libraries. The CVMFS client will resolve:
+
+- `host_injections` → `${eessi_host_injections}` (shared)
+- the NVIDIA compat symlink chain → `${eessi_nvidia_override_default}` (node-local)
+
+On the NFS server, `profile::nfs::server` pre-creates
+`/mnt/nfs${eessi_host_injections}` only if the corresponding volume is declared
+in `terraform.self.volumes.nfs`. For write access by a non-root CUDA installer,
+set:
+
+```yaml
+profile::nfs::server::eessi_host_injections_group: 'eessi'
+```
+
+If unset, the directory is created as `root:root` with mode `0755`. If set, it is
+created as `root:<group>` with mode `2775` and the setgid bit (new files inherit
+the group). This block is guarded and will not cause failures if the volume is
+absent. The configuration is idempotent.
 </details>
 
 ### dependencies
