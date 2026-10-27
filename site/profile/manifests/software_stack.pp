@@ -3,6 +3,8 @@ class profile::software_stack (
   Optional[String] $initial_profile = undef,
   Optional[Array[String]] $lmod_default_modules = undef,
   Optional[Hash[String, String]] $extra_site_env_vars = undef,
+  String $eessi_host_injections = '/opt/eessi',
+  String $eessi_nvidia_override_default = '/opt/eessi/nvidia',
 ) {
   include profile::consul
   include profile::cvmfs::client
@@ -72,6 +74,50 @@ class profile::software_stack (
         'extra_site_env_vars'  => $extra_site_env_vars,
       }
     ),
+  }
+
+  if $facts['software_stack'] == 'eessi' {
+    # EESSI reads two independent variant symlinks out of the local CernVM-FS
+    # configuration. They are deliberately pointed at DIFFERENT paths:
+    #
+    #   EESSI_HOST_INJECTIONS
+    #     -> /cvmfs/software.eessi.io/host_injections
+    #     Site-wide installs: the CUDA/cuDNN SDK, the 2023.06 layout, site MPI
+    #     overrides. This one belongs on shared storage, so a site install is
+    #     done once per architecture instead of once per node.
+    #
+    #   EESSI_NVIDIA_OVERRIDE_DEFAULT
+    #     -> /cvmfs/software.eessi.io/versions/<version>/compat/<os>/<arch>/lib/nvidia
+    #     Host driver libraries only. EESSI >= 2025.06 finds the host drivers
+    #     there (the target is /dev/null when unset, i.e. no GPU support).
+    #     Driver versions differ per node type, so this stays node-local.
+    #     profile::gpu::install populates that directory when its
+    #     lib_symlink_path is set to the same path (see
+    #     data/software_stack/eessi.yaml).
+    #
+    # www.eessi.io/docs/site_specific_config/host_injections/
+    # www.eessi.io/docs/site_specific_config/gpu/
+    $eessi_cvmfs_keys = [
+      "EESSI_HOST_INJECTIONS=${eessi_host_injections}",
+      "EESSI_NVIDIA_OVERRIDE_DEFAULT=${eessi_nvidia_override_default}",
+    ]
+
+    file { '/etc/cvmfs/config.d/software.eessi.io.local':
+      ensure  => file,
+      owner   => 'root',
+      group   => 'root',
+      mode    => '0644',
+      content => $eessi_cvmfs_keys.map |String $key| { "${key}\n" }.join,
+      require => Package['cvmfs-config-eessi'],
+      notify  => Exec['cvmfs_reload_eessi'],
+    }
+
+    exec { 'cvmfs_reload_eessi':
+      command     => '/usr/bin/cvmfs_config reload software.eessi.io',
+      refreshonly => true,
+      path        => ['/usr/bin'],
+      require     => Package['cvmfs'],
+    }
   }
 
   @consul::service { 'software_stack':

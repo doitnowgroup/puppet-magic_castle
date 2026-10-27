@@ -161,6 +161,46 @@ class profile::nfs::server (
     ensure_resource('file', $path, { ensure => directory, before => Nfs::Server::Export[$path] })
   }
 
+  # Pre-create the shared EESSI host_injections directory server-side.
+  #
+  # profile::software_stack::eessi_host_injections holds a client path such as
+  # /project/eessi. Clients mount this share and their root is root-squash, so a
+  # node cannot create the directory itself. This class runs on the NFS server,
+  # whose tag is in $no_root_squash_tags, so this run is not squashed.
+  #
+  # The directory is created only when the volume it lives on is declared in
+  # terraform.self.volumes.nfs. Otherwise nothing is required and no
+  # Profile::Volumes::Volume resource is referenced, which keeps clusters
+  # without a matching volume compiling.
+  #
+  # Set profile::nfs::server::eessi_host_injections_group to a group name to
+  # give users write access to it; it stays root-owned when unset.
+  $eessi_host_injections = lookup('profile::software_stack::eessi_host_injections', String, undef, '/opt/eessi')
+  if $eessi_host_injections =~ '^/[A-Za-z0-9]' and $eessi_host_injections !~ '^/mnt/nfs' {
+    $eessi_host_injections_volume = $eessi_host_injections.split('/').filter |$chunk| { $chunk != '' }[0]
+    if $eessi_host_injections_volume in $devices {
+      $eessi_host_injections_group = lookup('profile::nfs::server::eessi_host_injections_group', Optional[String], undef, undef)
+      if $eessi_host_injections_group {
+        $eessi_host_injections_attrs = {
+          ensure  => directory,
+          owner   => 'root',
+          group   => $eessi_host_injections_group,
+          mode    => '2775',
+          require => Profile::Volumes::Volume["nfs-${eessi_host_injections_volume}"],
+        }
+      } else {
+        $eessi_host_injections_attrs = {
+          ensure  => directory,
+          mode    => '0755',
+          require => Profile::Volumes::Volume["nfs-${eessi_host_injections_volume}"],
+        }
+      }
+      file { "/mnt/nfs${eessi_host_injections}":
+        * => $eessi_host_injections_attrs,
+      }
+    }
+  }
+
   if $export_path_list {
     # Allow instances with specific tags to mount NFS without root squash
     $instances = lookup('terraform.instances')
